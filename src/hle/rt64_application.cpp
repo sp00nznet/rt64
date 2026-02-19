@@ -87,22 +87,26 @@ namespace RT64 {
     }
 
     Application::SetupResult Application::setup(uint32_t threadId) {
+        fprintf(stderr, "[RT64:setup] entered setup(threadId=%u)\n", threadId); fflush(stderr);
 #   ifdef _WIN64
         if (!DynamicLibraries::load()) {
             fprintf(stderr, "Failed to load dynamic libraries. Make sure the dependencies are next to the Plugin's DLL.\n");
             return SetupResult::Success;
         }
+        fprintf(stderr, "[RT64:setup] dynamic libraries loaded\n"); fflush(stderr);
 #   endif
 
         // Attempt to load the configuration. If it couldn't be loaded, save a new file instead.
         if (!loadConfiguration()) {
             saveConfiguration();
         }
+        fprintf(stderr, "[RT64:setup] config loaded\n"); fflush(stderr);
 
         // Create the interpreter and its associated state.
         interpreter = std::make_unique<Interpreter>();
         state = std::make_unique<State>(core.RDRAM, core.MI_INTR_REG, core.checkInterrupts);
         interpreter->setup(state.get());
+        fprintf(stderr, "[RT64:setup] interpreter created\n"); fflush(stderr);
 
 #   if SCRIPT_ENABLED
         // Create the script API and library and check if there's a compatible game script with the current ROM.
@@ -119,18 +123,22 @@ namespace RT64 {
         // Create the application window.
         const char *windowTitle = "RT64";
         appWindow = std::make_unique<ApplicationWindow>();
+        fprintf(stderr, "[RT64:setup] creating appWindow, core.window HWND=%p\n", (void*)core.window); fflush(stderr);
         if (core.window != RenderWindow{}) {
             appWindow->setup(core.window, this, threadId);
         }
         else {
             appWindow->setup(windowTitle, this);
         }
+        fprintf(stderr, "[RT64:setup] appWindow created\n"); fflush(stderr);
 
         // Detect refresh rate from the display the window is located at.
         appWindow->detectRefreshRate();
+        fprintf(stderr, "[RT64:setup] refresh rate detected\n"); fflush(stderr);
 
         // Resolve the graphics API option in case it's automatic.
         chosenGraphicsAPI = UserConfiguration::resolveGraphicsAPI(userConfig.graphicsAPI);
+        fprintf(stderr, "[RT64:setup] chosen API resolved\n"); fflush(stderr);
 
 #   ifdef _WIN64
         // Windows can try falling back to the other API option in case of failure.
@@ -156,10 +164,13 @@ namespace RT64 {
 #       endif
 
             // Create a render interface with the preferred backend.
+            fprintf(stderr, "[RT64:setup] creating render interface for API %d\n", (int)chosenGraphicsAPI); fflush(stderr);
             switch (chosenGraphicsAPI) {
             case UserConfiguration::GraphicsAPI::D3D12:
 #       ifdef _WIN64
+                fprintf(stderr, "[RT64:setup] creating D3D12 interface\n"); fflush(stderr);
                 renderInterface = CreateD3D12Interface();
+                fprintf(stderr, "[RT64:setup] D3D12 interface created: %p\n", (void*)renderInterface.get()); fflush(stderr);
                 break;
 #       else
                 fprintf(stderr, "D3D12 is not supported on this platform. Please select a different Graphics API.\n");
@@ -174,7 +185,9 @@ namespace RT64 {
                 return SetupResult::InvalidGraphicsAPI;
 #       endif
             case UserConfiguration::GraphicsAPI::Vulkan:
+                fprintf(stderr, "[RT64:setup] creating Vulkan interface\n"); fflush(stderr);
                 renderInterface = CreateVulkanInterfaceWrapper(appWindow->windowHandle);
+                fprintf(stderr, "[RT64:setup] Vulkan interface created: %p\n", (void*)renderInterface.get()); fflush(stderr);
                 break;
             default:
                 fprintf(stderr, "Unknown Graphics API specified in configuration.\n");
@@ -183,7 +196,9 @@ namespace RT64 {
 
             if (renderInterface != nullptr) {
                 // Create the render device.
+                fprintf(stderr, "[RT64:setup] creating render device\n"); fflush(stderr);
                 device = renderInterface->createDevice();
+                fprintf(stderr, "[RT64:setup] render device created: %p\n", (void*)device.get()); fflush(stderr);
             }
         }
 
@@ -295,10 +310,12 @@ namespace RT64 {
         }
 
         // Call the init hook if one was attached.
+        fprintf(stderr, "[RT64:setup] calling init hook\n"); fflush(stderr);
         RenderHookInit *initHook = GetRenderHookInit();
         if (initHook != nullptr) {
             initHook(renderInterface.get(), device.get());
         }
+        fprintf(stderr, "[RT64:setup] init hook done, creating render workers\n"); fflush(stderr);
 
         // Create all the render workers.
         drawDataUploader = std::make_unique<BufferUploader>(device.get());
@@ -331,7 +348,9 @@ namespace RT64 {
             swapChainDesc.enablePresentWait = true;
         }
 
+        fprintf(stderr, "[RT64:setup] creating swap chain\n"); fflush(stderr);
         swapChain = presentGraphicsWorker->commandQueue->createSwapChain(swapChainDesc);
+        fprintf(stderr, "[RT64:setup] swap chain created\n"); fflush(stderr);
 
         // Before configuring multisampling, make sure the device actually supports it for the formats we'll use. If it doesn't, turn off antialiasing in the configuration.
         const RenderSampleCounts colorSampleCounts = device->getSampleCountsSupported(RenderTarget::colorBufferFormat(usesHDR));
@@ -342,10 +361,14 @@ namespace RT64 {
         }
 
         // Create the shader library.
+        fprintf(stderr, "[RT64:setup] creating shader library\n"); fflush(stderr);
         const RenderMultisampling multisampling = RasterShader::generateMultisamplingPattern(userConfig.msaaSampleCount(), device->getCapabilities().sampleLocations);
         shaderLibrary = std::make_unique<ShaderLibrary>(usesHDR, usesHardwareResolve);
+        fprintf(stderr, "[RT64:setup] setting up common shaders\n"); fflush(stderr);
         shaderLibrary->setupCommonShaders(renderInterface.get(), device.get());
+        fprintf(stderr, "[RT64:setup] setting up multisampling shaders\n"); fflush(stderr);
         shaderLibrary->setupMultisamplingShaders(renderInterface.get(), device.get(), multisampling);
+        fprintf(stderr, "[RT64:setup] shader library done\n"); fflush(stderr);
 
         // Create the shader caches.
         // Estimate the amount of shader compiler threads by trying to use about half of the system's available threads.

@@ -1347,6 +1347,16 @@ namespace RT64 {
                         }
 
                         // Determine if it needs to read the entire target from RAM or just a portion of it.
+                        {
+                            static int fbc_count = 0;
+                            bool willClear = ((colorFb->readHeight == 0) && !colorFormatUpdated) || colorImg.formatChanged;
+                            if (fbc_count < 100 || (fbc_count % 300 == 0)) {
+                                fprintf(stderr, "[RT64-DIAG] fbClear #%d: addr=0x%08X readH=%d fmtChg=%d fmtUpd=%d willClear=%d h=%d\n",
+                                        fbc_count, colorImg.address, colorFb->readHeight, (int)colorImg.formatChanged, (int)colorFormatUpdated, (int)willClear, colorFb->height);
+                                fflush(stderr);
+                            }
+                            fbc_count++;
+                        }
                         if (((colorFb->readHeight == 0) && !colorFormatUpdated) || colorImg.formatChanged) {
                             colorTarget->clearColorTarget(ext.framebufferGraphicsWorker);
                             colorFb->readHeight = 0;
@@ -1843,6 +1853,19 @@ namespace RT64 {
         const hlslpp::uint2 screenFbSize = newVI.fbSize();
         const uint8_t screenFbSiz = newVI.fbSiz();
         const bool viVisible = newVI.visible();
+        {
+            static int us_count = 0;
+            if (us_count < 30 || (us_count % 300 == 0)) {
+                uint32_t fbW = (uint32_t)screenFbSize[0], fbH = (uint32_t)screenFbSize[1];
+                Framebuffer *testFb = framebufferManager.find(screenFbAddress);
+                Framebuffer *testFbOrigin = framebufferManager.find(newVI.origin);
+                fprintf(stderr, "[RT64-DIAG] updateScreen #%d: fbAddr=0x%08X origin=0x%08X FOUND_FB=%d FOUND_ORIGIN=%d fbSize=(%u,%u) siz=%d vis=%d width=%u xScale=%.3f\n",
+                        us_count, screenFbAddress, newVI.origin, (testFb != nullptr), (testFbOrigin != nullptr),
+                        fbW, fbH, screenFbSiz, (int)viVisible, newVI.width, newVI.xScaleFloat());
+                fflush(stderr);
+            }
+            us_count++;
+        }
         bool viDifferent = false;
         if (!fromEarlyPresent) {
             // Keep last known screen VI updated.

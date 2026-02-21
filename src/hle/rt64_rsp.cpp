@@ -904,6 +904,17 @@ namespace RT64 {
         viewport.translate.z = float(vp->vtrans[3]) / DepthRange;
         extended.viewportOriginStack[viewportStackSize - 1] = ori;
         viewportChanged = true;
+        {
+            static int svp_count = 0;
+            if (svp_count < 50 || (svp_count % 500 == 0)) {
+                fprintf(stderr, "[RT64-DIAG] setViewport #%d: scale=(%.1f,%.1f) trans=(%.1f,%.1f) raw_vs=(%d,%d,%d,%d) raw_vt=(%d,%d,%d,%d)\n",
+                        svp_count, viewport.scale.x, viewport.scale.y, viewport.translate.x, viewport.translate.y,
+                        vp->vscale[0], vp->vscale[1], vp->vscale[2], vp->vscale[3],
+                        vp->vtrans[0], vp->vtrans[1], vp->vtrans[2], vp->vtrans[3]);
+                fflush(stderr);
+            }
+            svp_count++;
+        }
     }
 
     void RSP::pushViewport() {
@@ -1031,7 +1042,16 @@ namespace RT64 {
     }
 
     void RSP::setColorImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t segAddress) {
-        state->rdp->setColorImage(fmt, siz, width, fromSegmented(segAddress));
+        uint32_t physAddr = fromSegmented(segAddress);
+        static int sci_count = 0;
+        // Log ALL setColorImage calls for the first 500 gameplay calls to understand per-frame pattern
+        if (sci_count < 500 || (sci_count % 1000 == 0)) {
+            fprintf(stderr, "[RT64-DIAG] setColorImage #%d: seg=0x%08X phys=0x%08X fmt=%d siz=%d w=%d\n",
+                    sci_count, segAddress, physAddr, fmt, siz, width);
+            fflush(stderr);
+        }
+        sci_count++;
+        state->rdp->setColorImage(fmt, siz, width, physAddr);
     }
 
     void RSP::setDepthImage(uint32_t segAddress) {
@@ -1156,6 +1176,12 @@ namespace RT64 {
     }
 
     void RSP::drawIndexedTri(uint32_t a, uint32_t b, uint32_t c) {
+        static int tri_count = 0;
+        if (tri_count < 10 || (tri_count % 10000 == 0)) {
+            fprintf(stderr, "[RT64-DIAG] drawIndexedTri #%d: a=%u b=%u c=%u\n", tri_count, a, b, c);
+            fflush(stderr);
+        }
+        tri_count++;
         drawIndexedTri(a, b, c, false);
     }
 

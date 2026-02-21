@@ -138,6 +138,39 @@ namespace RT64 {
         // Present the VI specified by the event.
         // Attempt to find the matching framebuffer for the VI based on the origin address.
         // If that fails, we look at the shared storage.
+        // DIAG: dump raw RDRAM framebuffer on frame 500
+        {
+            static int fb_dump_count = 0;
+            fb_dump_count++;
+            if (fb_dump_count == 500 && present.screenVI.visible()) {
+                uint32_t fbAddr = present.screenVI.fbAddress();
+                auto fbSz = present.screenVI.fbSize();
+                uint32_t w = fbSz.x, h = fbSz.y;
+                // Read RGBA16 (5551) from storage and convert to RGB24 PPM
+                FILE *fp = fopen("D:/rampage/screenshots/rdram_framebuffer.ppm", "wb");
+                if (fp) {
+                    fprintf(fp, "P6\n%u %u\n255\n", w, h);
+                    const uint8_t *rdram = present.storage.data();
+                    for (uint32_t y = 0; y < h; y++) {
+                        for (uint32_t x = 0; x < w; x++) {
+                            uint32_t offset = (y * w + x) * 2;  // storage already starts at fbAddress
+                            // RDRAM is big-endian, read two bytes
+                            uint8_t b0 = rdram[offset ^ 3];
+                            uint8_t b1 = rdram[(offset + 1) ^ 3];
+                            uint16_t pixel = (b0 << 8) | b1;
+                            // RGBA16: RRRRRGGGGBBBBBBA
+                            uint8_t r = ((pixel >> 11) & 0x1F) * 255 / 31;
+                            uint8_t g = ((pixel >> 6) & 0x1F) * 255 / 31;
+                            uint8_t b = ((pixel >> 1) & 0x1F) * 255 / 31;
+                            fputc(r, fp); fputc(g, fp); fputc(b, fp);
+                        }
+                    }
+                    fclose(fp);
+                    fprintf(stderr, "[DIAG] Dumped RDRAM framebuffer %ux%u at 0x%08X to rdram_framebuffer.ppm\n", w, h, fbAddr);
+                    fflush(stderr);
+                }
+            }
+        }
         if (present.screenVI.visible()) {
             Framebuffer *viFb = nullptr;
             if (!viewRDRAM) {
@@ -313,6 +346,18 @@ namespace RT64 {
                 
                 VIRenderer::RenderParams renderParams;
                 if (colorTarget != nullptr) {
+                    static int pres_count = 0;
+                    pres_count++;
+                    if (pres_count <= 5 || pres_count % 300 == 0) {
+                        fprintf(stderr, "[PRESENT] #%d: colorTarget w=%u h=%u resScale=(%.2f,%.2f) dsMult=%u "
+                                "swapW=%u swapH=%u rmBB=%d\n",
+                                pres_count, colorTarget->width, colorTarget->height,
+                                (float)colorTarget->resolutionScale.x, (float)colorTarget->resolutionScale.y,
+                                colorTarget->downsampleMultiplier,
+                                ext.swapChain->getWidth(), ext.swapChain->getHeight(),
+                                (int)removeBlackBorders);
+                        fflush(stderr);
+                    }
                     renderParams.device = ext.device;
                     renderParams.commandList = commandList;
                     renderParams.swapChain = ext.swapChain;

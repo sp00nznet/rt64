@@ -42,6 +42,17 @@ namespace RT64 {
     }
 
     void VIRenderer::render(const RenderParams &p) {
+        static int vi_render_count = 0;
+        vi_render_count++;
+        if (vi_render_count <= 5 || vi_render_count % 300 == 0) {
+            auto fbSz = p.vi->fbSize();
+            fprintf(stderr, "[VI-RENDER] #%d: texW=%u texH=%u fbSize=(%u,%u) resScale=(%.2f,%.2f) ds=%u rmBB=%d gamma=%.3f\n",
+                    vi_render_count, p.textureWidth, p.textureHeight,
+                    (uint32_t)fbSz.x, (uint32_t)fbSz.y,
+                    (float)p.resolutionScale.x, (float)p.resolutionScale.y,
+                    p.downsamplingScale, (int)p.removeBlackBorders, p.vi->gamma());
+            fflush(stderr);
+        }
         const ShaderRecord *shader = nullptr;
         const RenderSampler *sampler = nullptr;
         switch (p.filtering) {
@@ -121,5 +132,22 @@ namespace RT64 {
 
         viewport = RenderViewport(topLeftViewport.x, topLeftViewport.y, bottomRightViewport.x - topLeftViewport.x, bottomRightViewport.y - topLeftViewport.y);
         scissor = RenderRect(lround(topLeftScissor.x), lround(topLeftScissor.y), lround(bottomRightScissor.x), lround(bottomRightScissor.y));
+
+        static int gvs_count = 0;
+        gvs_count++;
+        if (gvs_count <= 5 || gvs_count % 300 == 0) {
+            fprintf(stderr, "[VI-VIEWPORT] #%d: sdSize=(%.0f,%.0f) hdSize=(%.0f,%.0f) winSize=(%.0f,%.0f) "
+                    "viewRect=(%.1f,%.1f,%.1f,%.1f) cropRect=(%.1f,%.1f,%.1f,%.1f) "
+                    "viewport=(%.1f,%.1f,%.1f,%.1f) scissor=(%ld,%ld,%ld,%ld) rmBB=%d\n",
+                    gvs_count,
+                    (float)sdSize.x, (float)sdSize.y, (float)hdSize.x, (float)hdSize.y,
+                    (float)windowSize.x, (float)windowSize.y,
+                    (float)viViewRect.x, (float)viViewRect.y, (float)viViewRect.z, (float)viViewRect.w,
+                    (float)viCropRect.x, (float)viCropRect.y, (float)viCropRect.z, (float)viCropRect.w,
+                    viewport.x, viewport.y, viewport.width, viewport.height,
+                    scissor.left, scissor.top, scissor.right, scissor.bottom,
+                    (int)removeBlackBorders);
+            fflush(stderr);
+        }
     }
 };

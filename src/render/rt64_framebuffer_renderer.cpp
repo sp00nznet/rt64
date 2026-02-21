@@ -602,6 +602,17 @@ namespace RT64 {
                 bool rectCoversWholeTarget = (clearRect.rect.left == 0) && (clearRect.rect.top == 0) && (uint32_t(clearRect.rect.right) == chosenTarget->width) && (uint32_t(clearRect.rect.bottom) == chosenTarget->height);
                 const RenderRect *clearRects = rectCoversWholeTarget ? nullptr : &clearRect.rect;
                 uint32_t clearRectCount = rectCoversWholeTarget ? 0 : 1;
+                {
+                    static int rfc_count = 0;
+                    if (rfc_count < 50 || (rfc_count % 300 == 0)) {
+                        fprintf(stderr, "[RT64-DIAG] renderFillRect #%d: rect=(%d,%d,%d,%d) tgt=(%u,%u) covers=%d color=(%.2f,%.2f,%.2f,%.2f)\n",
+                                rfc_count, clearRect.rect.left, clearRect.rect.top, clearRect.rect.right, clearRect.rect.bottom,
+                                chosenTarget->width, chosenTarget->height, (int)rectCoversWholeTarget,
+                                clearRect.color.r, clearRect.color.g, clearRect.color.b, clearRect.color.a);
+                        fflush(stderr);
+                    }
+                    rfc_count++;
+                }
                 if (fbStorage->colorTarget != nullptr) {
                     worker->commandList->clearColor(0, clearRect.color, clearRects, clearRectCount);
                 }

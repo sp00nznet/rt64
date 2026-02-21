@@ -26,6 +26,11 @@
 #endif
 
 namespace RT64 {
+    // Diagnostic: frame-based logging for Rampage investigation
+    static int g_rdp_frame_counter = 0;
+    // Log ALL operations for frames 500-502 (gameplay should start by then at ~8s)
+    static bool g_rdp_dump_frame() { return g_rdp_frame_counter >= 500 && g_rdp_frame_counter <= 502; }
+
     // RDP
     static uint8_t getCommandLength(uint32_t commandId) {
         if (commandId == (G_TEXRECT & 0x3F) || commandId == (G_TEXRECTFLIP & 0x3F)) {
@@ -134,6 +139,12 @@ namespace RT64 {
         auto &fbManager = state->framebufferManager;
         Framebuffer *fb = fbManager.findMostRecentContaining(addressStart, addressEnd);
         if (fb != nullptr) {
+            if (g_rdp_dump_frame()) {
+                fprintf(stderr, "[FRAME-DUMP] checkFbOverlap: FOUND fb=0x%08X-%u texRange=0x%08X-0x%08X tmem=%u gpuCopy=%d makeTile=%d\n",
+                        fb->addressStart, fb->width, addressStart, addressEnd, tmemStart,
+                        (int)state->ext.emulatorConfig->framebuffer.copyWithGPU, (int)makeTileCopy);
+                fflush(stderr);
+            }
             const bool gpuCopiesEnabled = state->ext.emulatorConfig->framebuffer.copyWithGPU;
             if (!gpuCopiesEnabled) {
                 return;
@@ -144,6 +155,11 @@ namespace RT64 {
             if (makeTileCopy) {
                 // Find the best possible fitting GPU copy to store in this TMEM region.
                 couldMakeTile = fbManager.makeFramebufferTile(fb, addressStart, addressEnd, tileWidth, tileHeight, fbTile, RGBA32);
+                if (couldMakeTile && g_rdp_dump_frame()) {
+                    fprintf(stderr, "[FRAME-DUMP] fbTileCopy: fb=0x%08X tile=(%u,%u)-(%u,%u) tileW=%u tileH=%u\n",
+                            fb->addressStart, fbTile.left, fbTile.top, fbTile.right, fbTile.bottom, tileWidth, tileHeight);
+                    fflush(stderr);
+                }
             }
 
             // Always tags regions in TMEM, regardless of whether it's possible to make a copy or not.
@@ -256,6 +272,13 @@ namespace RT64 {
             (colorImage.width != width) ||
             (colorImage.address != newAddress))
         {
+            g_rdp_frame_counter++;
+            if (g_rdp_dump_frame()) {
+                fprintf(stderr, "[FRAME-DUMP] === Frame %d START === cimg=0x%08X fmt=%u siz=%u w=%u\n",
+                        g_rdp_frame_counter, newAddress, fmt, siz, width);
+                fflush(stderr);
+            }
+
             colorImage.fmt = fmt;
             colorImage.siz = siz;
             colorImage.width = width;
@@ -286,6 +309,14 @@ namespace RT64 {
         texture.width = width;
         texture.address = maskAddress(address);
         state->updateDrawStatusAttribute(DrawAttribute::Texture);
+
+        if (g_rdp_dump_frame()) {
+            bool isFbAddr = (texture.address == colorImage.address);
+            fprintf(stderr, "[FRAME-DUMP] setTextureImage: fmt=%u siz=%u width=%u addr=0x%08X cimg=0x%08X%s\n",
+                    fmt, siz, width, texture.address, colorImage.address,
+                    isFbAddr ? " **FB_OVERLAP**" : "");
+            fflush(stderr);
+        }
 
 #   ifdef LOG_TEXTURE_IMAGE_METHODS
         RT64_LOG_PRINTF("RDP::setTextureImage(fmt %u, siz %u, width %u, address 0x%08X)", fmt, siz, width, address);
@@ -321,6 +352,12 @@ namespace RT64 {
 #ifdef LOG_TILE_METHODS
         RT64_LOG_PRINTF("RDP::setTile(tile %u, fmt %u, siz %u, line %u, tmem %u, palette %u, cmt %u, cms %u, maskt %u, masks %u, shiftt %u, shifts %u)", tile, fmt, siz, line, tmem, palette, cmt, cms, maskt, masks, shiftt, shifts);
 #endif
+
+        if (g_rdp_dump_frame()) {
+            fprintf(stderr, "[FRAME-DUMP] setTile: tile=%u fmt=%u siz=%u line=%u tmem=%u pal=%u\n",
+                    tile, fmt, siz, line, tmem, palette);
+            fflush(stderr);
+        }
 
         assert(tile < RDP_TILES);
 
@@ -590,6 +627,11 @@ namespace RT64 {
 #ifdef LOG_LOAD_METHODS
         RT64_LOG_PRINTF("RDP::loadTile(tile %u, uls %u, ult %u, lrs %u, lrt %u)", tile, uls, ult, lrs, lrt);
 #endif
+        if (g_rdp_dump_frame()) {
+            fprintf(stderr, "[FRAME-DUMP] loadTile: tile=%u uls=%u ult=%u lrs=%u lrt=%u texAddr=0x%08X texW=%u texSiz=%u\n",
+                    tile, uls, ult, lrs, lrt, texture.address, texture.width, texture.siz);
+            fflush(stderr);
+        }
         assert(tile < RDP_TILES);
         auto &t = tiles[tile];
         t.uls = uls;
@@ -719,6 +761,11 @@ namespace RT64 {
 #ifdef LOG_LOAD_METHODS
         RT64_LOG_PRINTF("RDP::loadBlock(tile %u, uls %u, ult %u, lrs %u, dxt %u)", tile, uls, ult, lrs, dxt);
 #endif
+        if (g_rdp_dump_frame()) {
+            fprintf(stderr, "[FRAME-DUMP] loadBlock: tile=%u uls=%u ult=%u lrs=%u dxt=%u texAddr=0x%08X texW=%u texSiz=%u\n",
+                    tile, uls, ult, lrs, dxt, texture.address, texture.width, texture.siz);
+            fflush(stderr);
+        }
         assert(tile < RDP_TILES);
         auto &t = tiles[tile];
         t.uls = uls;
@@ -952,6 +999,14 @@ namespace RT64 {
 
     void RDP::setOtherMode(uint32_t high, uint32_t low) {
         if (otherMode.H != high || otherMode.L != low) {
+            if (g_rdp_dump_frame()) {
+                uint32_t oldCyc = (otherMode.H >> G_MDSFT_CYCLETYPE) & 3;
+                uint32_t newCyc = (high >> G_MDSFT_CYCLETYPE) & 3;
+                const char *names[] = {"1CYC","2CYC","COPY","FILL"};
+                fprintf(stderr, "[FRAME-DUMP] setOtherMode: H=0x%08X L=0x%08X cycleType=%s->%s\n",
+                        high, low, names[oldCyc], names[newCyc]);
+                fflush(stderr);
+            }
             otherMode.H = high;
             otherMode.L = low;
             state->updateDrawStatusAttribute(DrawAttribute::OtherMode);
@@ -968,6 +1023,11 @@ namespace RT64 {
     }
 
     void RDP::setScissor(uint8_t mode, int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
+        if (g_rdp_dump_frame()) {
+            fprintf(stderr, "[FRAME-DUMP] setScissor: (%.1f,%.1f)-(%.1f,%.1f) mode=%d\n",
+                    ulx/4.0f, uly/4.0f, lrx/4.0f, lry/4.0f, mode);
+            fflush(stderr);
+        }
         setScissor(mode, ulx, uly, lrx, lry, extended.global.scissor);
     }
     
@@ -1031,9 +1091,11 @@ namespace RT64 {
     }
 
     void RDP::fillRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, const ExtendedAlignment &extAlignment) {
-#   ifdef LOG_FILLRECT_METHODS
-        RT64_LOG_PRINTF("RDP::fillRect(ulx %d, uly %d, lrx %d, lry %d)", ulx, uly, lrx, lry);
-#   endif
+        if (g_rdp_dump_frame()) {
+            fprintf(stderr, "[FRAME-DUMP] fillRect: (%.1f,%.1f)-(%.1f,%.1f) fillColor=0x%08X\n",
+                    ulx/4.0f, uly/4.0f, lrx/4.0f, lry/4.0f, fillColorStack[fillColorStackSize-1]);
+            fflush(stderr);
+        }
 
         // Filter out incorrect rectangles.
         if ((lrx < ulx) || (lry < uly)) {
@@ -1308,6 +1370,17 @@ namespace RT64 {
     }
 
     void RDP::drawTexRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip) {
+        if (g_rdp_dump_frame()) {
+            const char *cycName = "??";
+            uint32_t cyc = otherMode.cycleType();
+            if (cyc == G_CYC_1CYCLE) cycName = "1CYC";
+            else if (cyc == G_CYC_2CYCLE) cycName = "2CYC";
+            else if (cyc == G_CYC_COPY) cycName = "COPY";
+            else if (cyc == G_CYC_FILL) cycName = "FILL";
+            fprintf(stderr, "[FRAME-DUMP] drawTexRect: (%.1f,%.1f)-(%.1f,%.1f) tile=%d uls=%d ult=%d dsdx=%d dtdy=%d flip=%d cyc=%s texAddr=0x%08X\n",
+                    ulx/4.0f, uly/4.0f, lrx/4.0f, lry/4.0f, tile, uls, ult, dsdx, dtdy, (int)flip, cycName, texture.address);
+            fflush(stderr);
+        }
         drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip, extended.global.rect);
     }
     

@@ -138,16 +138,18 @@ namespace RT64 {
         // Present the VI specified by the event.
         // Attempt to find the matching framebuffer for the VI based on the origin address.
         // If that fails, we look at the shared storage.
-        // DIAG: dump raw RDRAM framebuffer on frame 500
+        // DIAG: dump raw RDRAM framebuffer at frames 500 and 2000
         {
             static int fb_dump_count = 0;
             fb_dump_count++;
-            if (fb_dump_count == 500 && present.screenVI.visible()) {
+            if ((fb_dump_count >= 1200 && fb_dump_count <= 1205) && present.screenVI.visible()) {
                 uint32_t fbAddr = present.screenVI.fbAddress();
                 auto fbSz = present.screenVI.fbSize();
                 uint32_t w = fbSz.x, h = fbSz.y;
                 // Read RGBA16 (5551) from storage and convert to RGB24 PPM
-                FILE *fp = fopen("D:/rampage/screenshots/rdram_framebuffer.ppm", "wb");
+                char ppm_path[256];
+                snprintf(ppm_path, sizeof(ppm_path), "D:/rampage/screenshots/rdram_framebuffer_%d.ppm", fb_dump_count);
+                FILE *fp = fopen(ppm_path, "wb");
                 if (fp) {
                     fprintf(fp, "P6\n%u %u\n255\n", w, h);
                     const uint8_t *rdram = present.storage.data();
@@ -166,7 +168,7 @@ namespace RT64 {
                         }
                     }
                     fclose(fp);
-                    fprintf(stderr, "[DIAG] Dumped RDRAM framebuffer %ux%u at 0x%08X to rdram_framebuffer.ppm\n", w, h, fbAddr);
+                    fprintf(stderr, "[DIAG] Dumped RDRAM framebuffer %ux%u at 0x%08X to %s\n", w, h, fbAddr, ppm_path);
                     fflush(stderr);
                 }
             }

@@ -85,8 +85,11 @@ namespace RT64 {
         p.commandList->setScissors(scissor);
 
         interop::VideoInterfaceCB pushConstants;
-        pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);
         pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
+        // Set videoResolution to match textureResolution so the shader samples the
+        // full texture across the viewport. The viewRectangle/cropRectangle handle
+        // the 4:3 aspect ratio correction by sizing the viewport appropriately.
+        pushConstants.videoResolution = pushConstants.textureResolution;
         pushConstants.gamma = p.vi->gamma();
 
         p.commandList->setPipeline(shader->pipeline.get());

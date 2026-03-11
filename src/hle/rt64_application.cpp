@@ -478,6 +478,17 @@ namespace RT64 {
         // Set up the RDP
         state->rdp->setGBI();
 
+        // Always create the Inspector for the ImGui menu bar overlay.
+        {
+            const std::lock_guard lock(presentQueue->inspectorMutex);
+            if (presentQueue->inspector == nullptr) {
+                presentQueue->inspector = std::make_unique<Inspector>(device.get(), swapChain.get(), chosenGraphicsAPI, appWindow->sdlWindow);
+                if (!userPaths.isEmpty()) {
+                    presentQueue->inspector->setIniPath(userPaths.imguiPath);
+                }
+            }
+        }
+
         return SetupResult::Success;
     }
 
@@ -577,7 +588,7 @@ namespace RT64 {
 
 #ifdef _WIN32
     bool Application::windowMessageFilter(unsigned int message, WPARAM wParam, LPARAM lParam) {
-        if (userConfig.developerMode && (presentQueue != nullptr) && (state != nullptr) && !FileDialog::isOpen) {
+        if ((presentQueue != nullptr) && (state != nullptr) && !FileDialog::isOpen) {
             const std::lock_guard lock(presentQueue->inspectorMutex);
             if ((presentQueue->inspector != nullptr) && presentQueue->inspector->handleMessage(message, wParam, lParam)) {
                 return true;
@@ -611,7 +622,7 @@ namespace RT64 {
 #endif
 
     bool Application::sdlEventFilter(SDL_Event *event) {
-        if (userConfig.developerMode && (presentQueue != nullptr) && (state != nullptr) && !FileDialog::isOpen) {
+        if ((presentQueue != nullptr) && (state != nullptr) && !FileDialog::isOpen) {
             const std::lock_guard lock(presentQueue->inspectorMutex);
             if ((presentQueue->inspector != nullptr) && presentQueue->inspector->handleSdlEvent(event)) {
                 return true;

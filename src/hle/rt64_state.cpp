@@ -11,6 +11,7 @@
 #include "im3d/im3d_math.h"
 #include "imgui/imgui.h"
 #include "implot/implot.h"
+#include "SDL.h"
 
 #include "common/rt64_elapsed_timer.h"
 #include "common/rt64_math.h"
@@ -1613,9 +1614,7 @@ namespace RT64 {
 
         // Inspect the current workload before submission.
         lastWorkloadIndex = ext.workloadQueue->writeCursor;
-        if (ext.userConfig->developerMode) {
-            inspect();
-        }
+        inspect();
 
         // Add any lights to the workload from the presets that are activated.
         for (const auto &it : lightsLibrary.presetMap) {
@@ -1820,9 +1819,7 @@ namespace RT64 {
     void State::updateScreen(const VI &newVI, bool fromEarlyPresent) {
         // If the debugger has paused the plugin, keep submitting the last workload and screen VI for rendering and a present event.
         if (debuggerInspector.paused && !fromEarlyPresent) {
-            if (ext.userConfig->developerMode) {
-                inspect();
-            }
+            inspect();
             
             // Wait for the workload and present that has been submitted already to be processed.
             ext.workloadQueue->waitForWorkloadId(workloadId);
@@ -1998,6 +1995,52 @@ namespace RT64 {
         Workload &workload = ext.workloadQueue->workloads[lastWorkloadIndex];
         InspectorMode inspectorMode = InspectorMode::None;
         inspector->newFrame(ext.framebufferGraphicsWorker);
+
+        // Always draw the application menu bar.
+        if (ImGui::BeginMainMenuBar()) {
+            if (ImGui::BeginMenu("File")) {
+                if (ImGui::MenuItem("Quit", "Alt+F4")) {
+                    SDL_Event quitEvent;
+                    quitEvent.type = SDL_QUIT;
+                    SDL_PushEvent(&quitEvent);
+                }
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("Config")) {
+                genConfigChanged = ImGui::Combo("Graphics API", reinterpret_cast<int *>(&userConfig.graphicsAPI), "D3D12\0Vulkan\0Metal\0Automatic\0") || genConfigChanged;
+                resConfigChanged = ImGui::Combo("Resolution Mode", reinterpret_cast<int *>(&userConfig.resolution), "Original\0Window Integer Scale\0Manual\0") || resConfigChanged;
+                if (userConfig.resolution == UserConfiguration::Resolution::Manual) {
+                    resConfigChanged = ImGui::InputDouble("Resolution Multiplier", &userConfig.resolutionMultiplier) || resConfigChanged;
+                }
+                ImGui::Separator();
+                genConfigChanged = ImGui::Combo("Filtering", reinterpret_cast<int *>(&userConfig.filtering), "Linear\0Three-Point\0") || genConfigChanged;
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu("About")) {
+                ImGui::Text("Rampage: World Tour Recompiled");
+                ImGui::Separator();
+                ImGui::Text("Built with N64Recomp + RT64");
+                ImGui::Text("Keyboard: WASD=stick, Space=A, LShift=B");
+                ImGui::Text("  Enter=START, Arrows=C, IJKL=DPad");
+                ImGui::EndMenu();
+            }
+            ImGui::EndMainMenuBar();
+        }
+
+        // Developer-only: Game editor and debugger tools.
+        if (!ext.userConfig->developerMode) {
+            inspector->endFrame();
+            ext.presentQueue->inspectorMutex.unlock();
+
+            // Update renderer configuration.
+            const bool configChanged = genConfigChanged || resConfigChanged;
+            if (configChanged) {
+                configurationSaveQueued = true;
+                userConfig.validate();
+                ext.sharedQueueResources->setUserConfig(userConfig, resConfigChanged);
+            }
+            return;
+        }
 
         if (ext.app->freeCamClearQueued) {
             debuggerInspector.camera.enabled = false;

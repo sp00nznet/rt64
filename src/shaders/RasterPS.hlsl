@@ -204,6 +204,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         }
     }
     
+    // In COPY mode, discard pixels with zero alpha (CI8 palette transparency).
+    // Real N64 RDP COPY mode does not write texels with alpha=0.
+    if (otherMode.cycleType() == G_CYC_COPY && combinerColor.a < (1.0f / 255.0f)) {
+        return false;
+    }
+
     // Compute coverage estimation.
     const bool usesHDR = renderFlagUsesHDR(rp.flags);
     const float cvgRange = usesHDR ? 65535.0f : 255.0f;

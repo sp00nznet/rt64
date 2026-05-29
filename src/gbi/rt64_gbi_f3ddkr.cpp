@@ -276,6 +276,46 @@ namespace RT64 {
             gDiag.dmaDlCount++;
         }
 
+        // --- G_SETCIMG (0xFF) ---
+        // DKR sends SEGMENTED addresses (segment id in bits 27:24) where
+        // standard F3D usage is physical. F3D's RDP::setColorImage takes
+        // w1 raw, so RT64's framebuffer manager would key by the segmented
+        // bits and never match VI_ORIGIN's physical address. Resolve here.
+        static void setColorImageResolved(State *state, DisplayList **dl) {
+            const uint32_t w0 = (*dl)->w0;
+            const uint32_t w1 = (*dl)->w1;
+            const uint8_t fmt = (w0 >> 21) & 0x7;
+            const uint8_t siz = (w0 >> 19) & 0x3;
+            const uint16_t width = (w0 & 0xFFF) + 1;
+            const uint32_t resolved = state->rsp->fromSegmentedMasked(w1);
+            static int s_count = 0;
+            if (s_count < 10 || (s_count % 1000 == 0)) {
+                fprintf(stderr,
+                    "[F3DDKR-RT64] G_SETCIMG #%d: w1=0x%08X (seg=%u off=0x%06X) -> resolved=0x%08X width=%u\n",
+                    s_count, w1, (w1 >> 24) & 0xF, w1 & 0xFFFFFF, resolved, width);
+                fflush(stderr);
+            }
+            s_count++;
+            state->rdp->setColorImage(fmt, siz, width, resolved);
+        }
+
+        // G_SETZIMG (0xFE): DKR also uses segmented addresses here.
+        static void setDepthImageResolved(State *state, DisplayList **dl) {
+            const uint32_t resolved = state->rsp->fromSegmentedMasked((*dl)->w1);
+            state->rdp->setDepthImage(resolved);
+        }
+
+        // G_SETTIMG (0xFD): DKR uses segmented addresses for texture image
+        // pointers too — these feed loadBlock/loadTile.
+        static void setTextureImageResolved(State *state, DisplayList **dl) {
+            const uint32_t w0 = (*dl)->w0;
+            const uint32_t resolved = state->rsp->fromSegmentedMasked((*dl)->w1);
+            const uint8_t fmt = (w0 >> 21) & 0x7;
+            const uint8_t siz = (w0 >> 19) & 0x3;
+            const uint16_t width = (w0 & 0xFFF) + 1;
+            state->rdp->setTextureImage(fmt, siz, width, resolved);
+        }
+
         // --- G_DMA_OFFSETS (0xBF) ---
         //   w0 & 0x00FFFFFF = matrix DMA offset
         //   w1 & 0x00FFFFFF = vertex DMA offset
@@ -297,6 +337,13 @@ namespace RT64 {
             gbi->map[F3DDKR_G_DMADL]        = &dmaDl;
             gbi->map[F3DDKR_G_MOVEWORD]     = &moveWord;
             gbi->map[F3DDKR_G_DMA_OFFSETS]  = &dmaOffsets;
+            // DKR sends segmented addresses to G_SETCIMG / G_SETZIMG / G_SETTIMG.
+            // Override F3D's bindings (which take w1 raw) with segment-resolving
+            // wrappers so RT64's framebuffer manager and texture cache can match
+            // by physical address.
+            gbi->map[0xFF /* G_SETCIMG */]  = &setColorImageResolved;
+            gbi->map[0xFE /* G_SETZIMG */]  = &setDepthImageResolved;
+            gbi->map[0xFD /* G_SETTIMG */]  = &setTextureImageResolved;
             // 0xBF in F3D is G_TRI1; in F3DDKR it is G_DMA_OFFSETS. The line
             // above replaces F3D's tri1 binding, which is correct — DKR
             // never sends a G_TRI1 there.

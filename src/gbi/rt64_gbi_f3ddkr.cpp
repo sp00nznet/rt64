@@ -23,8 +23,6 @@
 
 #include "rt64_gbi_f3ddkr.h"
 
-#include <cstdio>
-
 #include "hle/rt64_interpreter.h"
 #include "rt64_gbi_f3d.h"
 #include "shared/rt64_f3d_defines.h"
@@ -42,51 +40,13 @@ namespace RT64 {
         };
         static DkrState gDkr;
 
-        // Diagnostic counters — periodic stderr dump confirms which DKR
-        // opcodes the GBI is actually receiving and dispatching.
-        struct DkrDiag {
-            uint64_t mtxCount = 0;
-            uint64_t vtxCount = 0;
-            uint64_t vtxBillboardCount = 0;
-            uint64_t trinCount = 0;
-            uint64_t triCount = 0;
-            uint64_t dmaDlCount = 0;
-            uint64_t dmaDlSubCmds = 0;
-            uint64_t dmaOffsetsCount = 0;
-            uint64_t moveWordCount = 0;
-            uint64_t resetCount = 0;
-        };
-        static DkrDiag gDiag;
-        static int gDiagDumpInterval = 0;
-        static void maybeDumpDiag(const char *site) {
-            if (++gDiagDumpInterval >= 2000) {
-                gDiagDumpInterval = 0;
-                fprintf(stderr,
-                    "[RT64-F3DDKR] @%s resets=%llu mtx=%llu vtx=%llu(bb=%llu) trin=%llu tri=%llu "
-                    "dmadl=%llu(subcmds=%llu) dmaoff=%llu mw=%llu\n",
-                    site,
-                    (unsigned long long)gDiag.resetCount,
-                    (unsigned long long)gDiag.mtxCount,
-                    (unsigned long long)gDiag.vtxCount,
-                    (unsigned long long)gDiag.vtxBillboardCount,
-                    (unsigned long long)gDiag.trinCount,
-                    (unsigned long long)gDiag.triCount,
-                    (unsigned long long)gDiag.dmaDlCount,
-                    (unsigned long long)gDiag.dmaDlSubCmds,
-                    (unsigned long long)gDiag.dmaOffsetsCount,
-                    (unsigned long long)gDiag.moveWordCount);
-                fflush(stderr);
-            }
-        }
 
         static void reset(State *state) {
             gDkr = DkrState{};
-            gDiag.resetCount++;
             // F3D::reset isn't exported; inline its two calls so we keep RSP
             // defaults sane after replacing resetFromTask below.
             state->rsp->setLookAtVectors(hlslpp::float3(0.0f, 1.0f, 0.0f), hlslpp::float3(1.0f, 0.0f, 0.0f));
             state->rsp->setFog(0x0100, 0x0000);
-            maybeDumpDiag("reset");
         }
 
         // --- G_MTX (0x01) ---
@@ -121,7 +81,6 @@ namespace RT64 {
             }
 
             state->rsp->matrix(address, params);
-            gDiag.mtxCount++;
         }
 
         // --- G_MOVEWORD (0xBC) ---
@@ -158,7 +117,6 @@ namespace RT64 {
             default:
                 break;
             }
-            gDiag.moveWordCount++;
         }
 
         // --- G_VTX (0x04) ---
@@ -177,8 +135,6 @@ namespace RT64 {
 
             state->rsp->setVertexDKR(addr, count, dstIndex, gDkr.billboardEnabled);
             gDkr.nextAppendIndex = dstIndex + count;
-            gDiag.vtxCount += count;
-            if (gDkr.billboardEnabled) gDiag.vtxBillboardCount += count;
         }
 
         // --- G_TRIN (0x05) ---
@@ -240,10 +196,7 @@ namespace RT64 {
                 } else {
                     state->rsp->drawIndexedTri(vi0, vi1, vi2);
                 }
-                gDiag.triCount++;
             }
-            gDiag.trinCount++;
-            maybeDumpDiag("trin");
         }
 
         // --- G_DMADL (0x07) ---
@@ -271,9 +224,7 @@ namespace RT64 {
                 }
                 DisplayList *cursor = cur;
                 func(state, &cursor);
-                gDiag.dmaDlSubCmds++;
             }
-            gDiag.dmaDlCount++;
         }
 
         // --- G_SETCIMG (0xFF) ---
@@ -283,19 +234,10 @@ namespace RT64 {
         // bits and never match VI_ORIGIN's physical address. Resolve here.
         static void setColorImageResolved(State *state, DisplayList **dl) {
             const uint32_t w0 = (*dl)->w0;
-            const uint32_t w1 = (*dl)->w1;
             const uint8_t fmt = (w0 >> 21) & 0x7;
             const uint8_t siz = (w0 >> 19) & 0x3;
             const uint16_t width = (w0 & 0xFFF) + 1;
-            const uint32_t resolved = state->rsp->fromSegmentedMasked(w1);
-            static int s_count = 0;
-            if (s_count < 10 || (s_count % 1000 == 0)) {
-                fprintf(stderr,
-                    "[F3DDKR-RT64] G_SETCIMG #%d: w1=0x%08X (seg=%u off=0x%06X) -> resolved=0x%08X width=%u\n",
-                    s_count, w1, (w1 >> 24) & 0xF, w1 & 0xFFFFFF, resolved, width);
-                fflush(stderr);
-            }
-            s_count++;
+            const uint32_t resolved = state->rsp->fromSegmentedMasked((*dl)->w1);
             state->rdp->setColorImage(fmt, siz, width, resolved);
         }
 
@@ -324,7 +266,6 @@ namespace RT64 {
             const uint32_t w1 = (*dl)->w1;
             gDkr.matrixDmaOffset = w0 & 0x00FFFFFF;
             gDkr.vertexDmaOffset = w1 & 0x00FFFFFF;
-            gDiag.dmaOffsetsCount++;
         }
 
         void setup(GBI *gbi) {

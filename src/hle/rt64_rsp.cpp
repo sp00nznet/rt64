@@ -402,6 +402,68 @@ namespace RT64 {
         setVertexCommon<true, sizeof(VertexPD)>(rdramAddress, dstIndex, dstIndex + vtxCount);
     }
 
+    void RSP::setVertexDKR(uint32_t address, uint32_t vtxCount, uint32_t dstIndex, bool billboardEnabled) {
+        if ((dstIndex >= RSP_MAX_VERTICES) || ((dstIndex + vtxCount) > RSP_MAX_VERTICES)) {
+            assert(false && "Vertex indices are not valid. DL is possibly corrupted.");
+            return;
+        }
+
+        const uint32_t rdramAddress = fromSegmentedMasked(address);
+        uint8_t *RDRAM = state->RDRAM;
+        // DKR vert stride = 10 bytes; values stored big-endian, accessed
+        // via N64Recomp's XOR-3 byte-swap convention.
+        for (uint32_t i = 0; i < vtxCount; i++) {
+            const uint32_t base = rdramAddress + i * 10;
+            auto read_s16 = [&](uint32_t off) -> int16_t {
+                uint16_t hi = RDRAM[(base + off    ) ^ 3];
+                uint16_t lo = RDRAM[(base + off + 1) ^ 3];
+                return int16_t((hi << 8) | lo);
+            };
+            auto read_u8 = [&](uint32_t off) -> uint8_t {
+                return RDRAM[(base + off) ^ 3];
+            };
+
+            Vertex &v = vertices[dstIndex + i];
+            v.x = read_s16(0);
+            v.y = read_s16(2);
+            v.z = read_s16(4);
+            v.flag = 0;
+            v.s = 0;  // patched per-tri by G_TRIN
+            v.t = 0;
+            v.color.r = read_u8(6);
+            v.color.g = read_u8(7);
+            v.color.b = read_u8(8);
+            v.color.a = read_u8(9);
+        }
+        setVertexCommon<true, 10>(rdramAddress, dstIndex, dstIndex + vtxCount);
+
+        // Billboard fixup: DKR's sprite mode adds the anchor's clip-space
+        // coords (slot 0) to every non-anchor vert in this load, then
+        // re-projects. The anchor is always RSP vertex slot 0.
+        if (billboardEnabled) {
+            const int workloadCursor = state->ext.workloadQueue->writeCursor;
+            Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
+            auto &posTransformed = workload.drawData.posTransformed;
+            auto &posScreen = workload.drawData.posScreen;
+            const interop::RSPViewport &viewport = viewportStack[viewportStackSize - 1];
+
+            // Just-loaded verts are appended at the end. They each got a fresh
+            // globalIndex assigned in setVertexCommon: indices[dstIndex+i].
+            const uint32_t anchorGlobal = indices[0];
+            if (anchorGlobal < posTransformed.size()) {
+                const hlslpp::float4 anchorClip = posTransformed[anchorGlobal];
+                for (uint32_t i = 0; i < vtxCount; i++) {
+                    if (dstIndex + i == 0) continue;  // anchor itself — leave alone
+                    const uint32_t gi = indices[dstIndex + i];
+                    if (gi >= posTransformed.size()) continue;
+                    hlslpp::float4 &tf = posTransformed[gi];
+                    tf = tf + anchorClip;
+                    posScreen[gi] = (tf.xyz / hlslpp::float3(tf.w, -tf.w, tf.w)) * viewport.scale + viewport.translate;
+                }
+            }
+        }
+    }
+
     void RSP::setVertexEXV1(uint32_t address, uint32_t vtxCount, uint32_t dstIndex) {
         if ((dstIndex >= RSP_MAX_VERTICES) || ((dstIndex + vtxCount) > RSP_MAX_VERTICES)) {
             assert(false && "Vertex indices are not valid. DL is possibly corrupted.");

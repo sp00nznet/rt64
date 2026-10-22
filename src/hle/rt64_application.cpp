@@ -90,7 +90,7 @@ namespace RT64 {
 #   ifdef _WIN64
         if (!DynamicLibraries::load()) {
             fprintf(stderr, "Failed to load dynamic libraries. Make sure the dependencies are next to the Plugin's DLL.\n");
-            return SetupResult::Success;
+            return SetupResult::DynamicLibrariesNotFound;
         }
 #   endif
 

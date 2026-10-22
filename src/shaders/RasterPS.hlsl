@@ -200,8 +200,14 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     }
 #endif
     
-    // Alpha compare.
-    if (otherMode.alphaCompare() == G_AC_DITHER) {
+    // Alpha compare. COPY mode has no combiner or threshold: when alpha compare is enabled, a
+    // texel is written only if its alpha is set (the alpha bit of 16-bit texels).
+    if ((otherMode.cycleType() == G_CYC_COPY) && (otherMode.alphaCompare() != G_AC_NONE)) {
+        if (combinerColor.a < (0.5f / 255.0f)) {
+            return false;
+        }
+    }
+    else if (otherMode.alphaCompare() == G_AC_DITHER) {
         if (alphaCompareValue < nextRand(randomSeed)) {
             return false;
         }

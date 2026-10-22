@@ -120,7 +120,7 @@ namespace RT64 {
         framebufferRenderer->updateMultisampling();
     }
 
-    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig) {
+    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viPixelAspect, WorkloadConfiguration &workloadConfig) {
         const std::scoped_lock lock(ext.sharedResources->configurationMutex);
         const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
         ext.sharedResources->swapChainSizeChanged = false;
@@ -137,7 +137,9 @@ namespace RT64 {
         switch (ratioMode) {
         case UserConfiguration::AspectRatio::Expand:
             if ((ext.sharedResources->swapChainWidth > 0) && (ext.sharedResources->swapChainHeight > 0)) {
-                const float derivedRatioTarget = float(ext.sharedResources->swapChainWidth) / float(ext.sharedResources->swapChainHeight);
+                // The window ratio is a display aspect; convert it to framebuffer pixels, which is what the
+                // source ratio measures (they differ when the VI stretches pixels, e.g. a 320x480 picture).
+                const float derivedRatioTarget = float(ext.sharedResources->swapChainWidth) / float(ext.sharedResources->swapChainHeight) / viPixelAspect;
                 workloadConfig.aspectRatioTarget = std::max(derivedRatioTarget, workloadConfig.aspectRatioSource);
             }
             else {
@@ -146,7 +148,7 @@ namespace RT64 {
 
             break;
         case UserConfiguration::AspectRatio::Manual:
-            workloadConfig.aspectRatioTarget = float(ext.sharedResources->userConfig.aspectTarget);
+            workloadConfig.aspectRatioTarget = float(ext.sharedResources->userConfig.aspectTarget) / viPixelAspect;
             break;
         case UserConfiguration::AspectRatio::Original:
         default:
@@ -912,7 +914,7 @@ namespace RT64 {
 
                 ElapsedTimer workloadTimer;
                 workloadProfiler.start();
-                threadConfigurationUpdate(workload.viFbSize, workloadConfig);
+                threadConfigurationUpdate(workload.viFbSize, workload.viPixelAspect, workloadConfig);
 
                 // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
                 if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {

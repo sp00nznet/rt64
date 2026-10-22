@@ -1623,6 +1623,7 @@ namespace RT64 {
 
         if (viHistory.top().vi.visible()) {
             workload.viFbSize = viHistory.top().vi.fbSize();
+            workload.viPixelAspect = viHistory.top().vi.pixelAspect();
         }
 
         // Log and reset profilers.

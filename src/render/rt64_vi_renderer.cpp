@@ -100,7 +100,10 @@ namespace RT64 {
         // on the screen. To work around that, the viewport the buffer will be drawn in will be expanded so only
         // the region of interest is rendered. A scissor will cut it off correctly according to the coordinates
         // specified by the VI.
-        const hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
+        // With black borders removed, the picture is the framebuffer itself, widened by the VI's pixel
+        // aspect so a stretched mode (such as 320x480 shown at 4:3) keeps its display shape.
+        const hlslpp::float2 fbSizeFloat = hlslpp::float2(vi.fbSize());
+        const hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(fbSizeFloat.x * vi.pixelAspect(), fbSizeFloat.y) : hlslpp::float2(320.0f, 240.0f);
         const hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
         const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
 

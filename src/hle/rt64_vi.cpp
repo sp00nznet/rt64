@@ -81,7 +81,9 @@ namespace RT64 {
         // Estimate the origin is off by one or two rows.
         if (siz >= G_IM_SIZ_16b) {
             const bool interlacedStep = status.serrate && (vCurrentLine & 0x1);
-            const uint32_t rowBytes = width * (1U << (siz - 1));
+            // Use the framebuffer row width, not the VI width: when the VI stride spans two rows of the
+            // framebuffer (see fbSize), the origin is still offset by framebuffer rows.
+            const uint32_t rowBytes = uint32_t(fbSize().x) * (1U << (siz - 1));
             const uint32_t rowCount = interlacedStep ? 2 : 1;
             const uint32_t rowOffset = rowBytes * rowCount;
             if (origin >= rowOffset) {
@@ -122,6 +124,22 @@ namespace RT64 {
         } else {
             return hlslpp::uint2(0, 0);
         }
+    }
+
+    float VI::pixelAspect() const {
+        // Width/height of one framebuffer pixel on the TV. The visible picture spans 640 output pixels
+        // and 474 half-lines (NTSC and PAL) at 4:3, so the displayed aspect of the region the VI scans
+        // out is (4/3) * (hSpan / 640) / (vSpan / 474). Dividing by the framebuffer's own aspect gives
+        // the pixel shape: 1.0 for a regular 320x240 or 640x480 picture, 2.0 for a 320x480 one.
+        const hlslpp::uint2 size = fbSize();
+        const float hSpan = float(hRegion.hEnd) - float(hRegion.hStart);
+        const float vSpan = float(vRegion.vEnd) - float(vRegion.vStart);
+        if ((size.x == 0) || (size.y == 0) || (hSpan <= 0.0f) || (vSpan <= 0.0f)) {
+            return 1.0f;
+        }
+
+        const float displayAspect = (4.0f / 3.0f) * (hSpan / 640.0f) / (vSpan / 474.0f);
+        return displayAspect / (float(size.x) / float(size.y));
     }
 
     float VI::xScaleFloat() const {

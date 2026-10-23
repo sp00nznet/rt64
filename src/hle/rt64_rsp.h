@@ -160,6 +160,10 @@ namespace RT64 {
         std::array<Vertex, RSP_MAX_VERTICES> vertices;
         std::array<uint32_t, RSP_MAX_VERTICES> indices;
         std::bitset<RSP_MAX_VERTICES> used;
+        std::array<uint32_t, RSP_MAX_VERTICES> screenXY; // last G_MWO_POINT_XYSCREEN/ZSCREEN per slot,
+        std::array<uint32_t, RSP_MAX_VERTICES> screenZ;  // so a copy made by modifyVertex keeps them
+        std::bitset<RSP_MAX_VERTICES> hasScreenXY;
+        std::bitset<RSP_MAX_VERTICES> hasScreenZ;
         std::array<Light, RSP_MAX_LIGHTS + 1> lights;
         int lightCount;
         uint32_t vertexFogIndex;
@@ -254,6 +258,12 @@ namespace RT64 {
         void setVertex(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
         void setVertexPD(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
         void setVertexEXV1(uint32_t address, uint32_t vtxCount, uint32_t dstIndex);
+        // DKR's custom 10-byte vert: i16 x, i16 y, i16 z, u8 r, u8 g, u8 b, u8 a (no UVs).
+        // Per-tri UVs come from G_TRIN and are patched via modifyVertex(G_MWO_POINT_ST)
+        // immediately before drawIndexedTri.
+        // billboardEnabled: post-MVP, add anchor (slot 0) clip coords to verts in this
+        // load (skipping any that ARE slot 0). Matches DKR's sprite billboard semantics.
+        void setVertexDKR(uint32_t address, uint32_t vtxCount, uint32_t dstIndex, bool billboardEnabled);
         void setVertexColorPD(uint32_t address);
         void setVertexSegmentV1(bool isEnabled, uint32_t vertexElement, uint32_t vertexAddress, uint32_t baseSegmentAddress);
         template<uint32_t floatCount, uint32_t vertexSize>

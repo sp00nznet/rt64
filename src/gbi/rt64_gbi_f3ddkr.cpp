@@ -1,24 +1,22 @@
 //
 // RT64
 //
-// F3DDKR — Diddy Kong Racing's custom Rare microcode (xbus variant).
+// F3DDKR: Diddy Kong Racing's graphics microcode (Rare's "xbus" variant of Fast3D).
 //
-// Stage 5: DKR-aware G_MTX and G_MOVEWORD on top of the Stage 4 vertex/
-// triangle/DMA work. DKR uses a 4-slot indexed matrix model rather than
-// F3D's projection/modelview stacks, and its MOVEWORD index encoding is
-// different from F3D. We map both onto RT64's matrix API best-effort:
-//   - Matrix slot 0 (camera VP) → RT64 projection LOAD
-//   - Slot >0 with multiply flag → RT64 modelview LOAD; RT64 then computes
-//     MVP = projection * modelview = slot0 * loaded, which matches DKR's
-//     `result = slot[0] * loaded` semantic.
-//   - Slot >0 without multiply → modelview LOAD (DKR expects pre-combined
-//     MVP here; we accept that projection will still be slot 0 — visible
-//     bug in the rare scenes that use this path, mostly UI overlays).
+// Encodings follow the DKR decompilation's include/f3ddkr.h (CC0,
+// https://github.com/DavidSM64/Diddy-Kong-Racing), which documents what the game sends:
 //
-// G_MOVEWORD: segment + fog map cleanly to RT64. Billboard flag is
-// recorded; honoring it would need a per-vertex post-MVP hook RT64 does
-// not currently expose. MVPMATRIX (switch active matrix without reloading
-// data) is not honored — most scenes implicitly re-activate via G_MTX.
+//  - Matrices live in four slots. G_MTX loads a complete model-view-projection matrix into a slot
+//    and makes it the active one; G_MOVEWORD G_MW_MVPMATRIX makes another slot active. There is no
+//    projection/modelview split, so the active slot is handed to RT64 as the modelview over a fixed
+//    projection (see selectSlot).
+//  - Vertices are 10 bytes (s16 x, y, z; u8 r, g, b, a) with no texture coordinates; G_TRIN
+//    triangles carry each corner's s/t, and a flag that turns backface culling off for that triangle.
+//  - Billboards: while enabled, each vertex loaded after the anchor (vertex 0) gets the anchor's
+//    clip-space position added after its own transform, before the perspective divide. RT64
+//    transforms vertices on the GPU, so the result is passed as a screen-position override.
+//  - G_DMADL runs a count-bounded block of commands from memory (no G_ENDDL).
+//  - G_SETCIMG, G_SETZIMG and G_SETTIMG get segmented addresses.
 //
 
 #include "rt64_gbi_f3ddkr.h"
@@ -27,270 +25,155 @@
 #include "rt64_gbi_f3d.h"
 #include "shared/rt64_f3d_defines.h"
 
+namespace RT64 { struct DisplayList; }
 namespace RT64 {
     namespace GBI_F3DDKR {
+        constexpr uint32_t CullFront = 0x1000; // F3D G_CULL_FRONT
+        constexpr uint32_t CullBack = 0x2000;  // F3D G_CULL_BACK
+        constexpr uint32_t CullBoth = CullFront | CullBack;
 
-        // Per-task DKR state. RT64 is single-threaded through the interpreter
-        // so a namespace-local is safe. Reset by `reset()` at task start.
         struct DkrState {
-            uint32_t vertexDmaOffset = 0;
-            uint32_t matrixDmaOffset = 0;
-            uint32_t nextAppendIndex = 0;  // tracks G_VTX append cursor
-            bool billboardEnabled = false; // Stage 5: recorded, not honored
+            hlslpp::float4x4 slots[4];
+            uint32_t slotAddress[4] = {};
+            uint32_t vertexCount = 0; // size of the last non-appending G_VTX: appends land right after it
+            bool billboard = false;
         };
-        static DkrState gDkr;
+        static DkrState dkr; // the interpreter runs one display list at a time
 
+        // RT64 tags each vertex with the modelview current when it's loaded, but picks up projection
+        // changes only when a triangle is drawn, and DKR switches matrices between vertex loads (one
+        // per bone). So the projection stays fixed for the whole task: a plain perspective matrix,
+        // which also keeps RT64 treating the scene as 3D (depth, clipping). Each slot goes in as the
+        // modelview slot * inverse(projection), so modelview * projection is exactly the slot.
+        static const hlslpp::float4x4 FixedProj(1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, -1.0f, 0.0f, 0.0f, -2.0f, 0.0f);
+        static const hlslpp::float4x4 FixedProjInverse = hlslpp::inverse(FixedProj);
+
+        static void selectSlot(State *state, uint32_t slot) {
+            RSP *rsp = state->rsp.get();
+            rsp->matrixCommon(hlslpp::mul(dkr.slots[slot], FixedProjInverse), dkr.slotAddress[slot], rsp->loadMask);
+        }
 
         static void reset(State *state) {
-            gDkr = DkrState{};
-            // F3D::reset isn't exported; inline its two calls so we keep RSP
-            // defaults sane after replacing resetFromTask below.
+            dkr = DkrState{};
+            for (auto &m : dkr.slots) m = hlslpp::float4x4::identity();
+            RSP *rsp = state->rsp.get();
+            rsp->matrixCommon(FixedProj, 0, uint8_t(rsp->projMask | rsp->loadMask));
             state->rsp->setLookAtVectors(hlslpp::float3(0.0f, 1.0f, 0.0f), hlslpp::float3(1.0f, 0.0f, 0.0f));
             state->rsp->setFog(0x0100, 0x0000);
         }
 
-        // --- G_MTX (0x01) ---
-        // DKR encoding:
-        //   w0[23:22] = matrix slot index (0-3)
-        //   w0[21]    = multiply flag (1 = slot[idx] = slot[0] * loaded)
-        //   w0[15:0]  = byte length (always 64 for a single matrix)
-        //   w1        = segmented address of FixedMatrix (+ matrixDmaOffset)
-        // After loading, the slot becomes the active vertex transform.
+        // G_MTX (0x01): w0[23:22] = slot, w1 = address of a fixed-point Mtx.
         static void mtx(State *state, DisplayList **dl) {
-            const uint32_t w0 = (*dl)->w0;
-            const uint32_t w1 = (*dl)->w1;
-            const uint32_t index = (w0 >> 22) & 0x3;
-            const uint32_t multiply = (w0 >> 21) & 0x1;
-            const uint32_t address = w1 + gDkr.matrixDmaOffset;
-
-            // RT64's RSP matrix() reads 64-byte FixedMatrix and dispatches to
-            // matrixCommon with F3D-style param bits. Construct those bits
-            // from DKR's slot/multiply.
-            uint8_t params = 0;
-            if (index == 0) {
-                // Slot 0 → projection LOAD (G_MTX_PROJECTION | G_MTX_LOAD).
-                params = uint8_t(state->rsp->projMask | state->rsp->loadMask);
-            } else {
-                // Slot N>0 → modelview LOAD. If DKR's multiply flag is set,
-                // the loaded matrix is just the model component and RT64's
-                // projection * modelview pipeline reconstructs the MVP. If
-                // not set, the loaded matrix is pre-combined MVP — we still
-                // load it as modelview and accept the bug (see file header).
-                params = uint8_t(state->rsp->loadMask);
-                (void)multiply;
-            }
-
-            state->rsp->matrix(address, params);
+            const uint32_t slot = ((*dl)->w0 >> 22) & 0x3;
+            const uint32_t address = (*dl)->w1;
+            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked(address);
+            dkr.slots[slot] = reinterpret_cast<const FixedMatrix *>(state->fromRDRAM(rdramAddress))->toMatrix4x4();
+            dkr.slotAddress[slot] = address;
+            selectSlot(state, slot);
         }
 
-        // --- G_MOVEWORD (0xBC) ---
-        // DKR encoding:
-        //   w0[7:0]   = index (which kind of word)
-        //   w0[23:8]  = sub-offset
-        //   w1        = value
-        // Indices DKR uses:
-        //   0x02 BILLBOARD: w1[0] = enable flag
-        //   0x06 SEGMENT:   offset/4 = segment id, w1 = segment value
-        //   0x08 FOG:       w1[31:16] = mul, w1[15:0] = offset
-        //   0x0A MVPMATRIX: w1[7:6] = active matrix slot (not honored)
+        // G_MOVEWORD (0xBC): w0[7:0] = index, w0[23:8] = offset, w1 = value.
         static void moveWord(State *state, DisplayList **dl) {
             const uint32_t w0 = (*dl)->w0;
             const uint32_t w1 = (*dl)->w1;
-            const uint8_t  index  = uint8_t(w0 & 0xFF);
             const uint16_t offset = uint16_t((w0 >> 8) & 0xFFFF);
-
-            switch (index) {
+            switch (w0 & 0xFF) {
             case F3DDKR_G_MW_BILLBOARD:
-                gDkr.billboardEnabled = (w1 & 1) != 0;
+                dkr.billboard = (w1 & 1) != 0;
                 break;
-            case F3DDKR_G_MW_SEGMENT: {
-                const uint32_t seg = offset / 4;
-                if (seg < 16) {
-                    state->rsp->setSegment(seg, w1);
-                }
+            case F3DDKR_G_MW_MVPMATRIX:
+                selectSlot(state, (w1 >> 6) & 0x3);
                 break;
-            }
+            case F3DDKR_G_MW_SEGMENT:
+                if ((offset / 4) < 16) state->rsp->setSegment(offset / 4, w1);
+                break;
             case F3DDKR_G_MW_FOG:
                 state->rsp->setFog(int16_t(w1 >> 16), int16_t(w1 & 0xFFFF));
                 break;
-            // F3DDKR_G_MW_MATRIX (0x0A): see file header — not honored.
-            default:
+            default: // clip ratio and the rest: nothing RT64 uses
                 break;
             }
         }
 
-        // --- G_VTX (0x04) ---
-        // gSPVertexDKR encodes:
-        //   w0[23:19] = (count-1) [5 bits, up to 32 verts]
-        //   w0[16]    = append flag (1 = append, 0 = replace from index 0)
-        //   w1        = segmented address of vertex data (plus DMA offset)
+        // G_VTX (0x04): w0[23:19] = count - 1, w0[16] = append, w1 = address.
         static void vtx(State *state, DisplayList **dl) {
             const uint32_t w0 = (*dl)->w0;
-            const uint32_t w1 = (*dl)->w1;
-            const uint32_t count  = ((w0 >> 19) & 0x1F) + 1;
-            const uint32_t append = (w0 >> 16) & 0x1;
-
-            const uint32_t dstIndex = append ? gDkr.nextAppendIndex : 0;
-            const uint32_t addr = w1 + gDkr.vertexDmaOffset;
-
-            state->rsp->setVertexDKR(addr, count, dstIndex, gDkr.billboardEnabled);
-            gDkr.nextAppendIndex = dstIndex + count;
+            const uint32_t count = ((w0 >> 19) & 0x1F) + 1;
+            const uint32_t dst = ((w0 >> 16) & 0x1) ? dkr.vertexCount : 0;
+            if (dst + count > RSP_MAX_VERTICES) return;
+            state->rsp->setVertexDKR((*dl)->w1, count, dst, dkr.billboard);
+            if (dst == 0) dkr.vertexCount = count; // appends never move the cursor (f3ddkr.h)
         }
 
-        // --- G_TRIN (0x05) ---
-        // gSPPolygon encodes:
-        //   w0[23:20] = (numTris-1)
-        //   w0[16]    = tex_enabled (informational)
-        //   w1        = segmented address of triangle array
-        //
-        // Each tri struct (16 bytes):
-        //   flags(u8) vi0(u8) vi1(u8) vi2(u8) uv0_s(s16) uv0_t(s16)
-        //   uv1_s(s16) uv1_t(s16) uv2_s(s16) uv2_t(s16)
-        //
-        // flags bit 0x40 = draw backface (skip culling for this tri).
+        // G_TRIN (0x05): w0[23:20] = count - 1, w0[16] = textured, w1 = address of 16-byte Triangles:
+        // flags (0x40 = draw the back face), three vertex indices, then three s16 s/t pairs.
         static void trin(State *state, DisplayList **dl) {
             const uint32_t w0 = (*dl)->w0;
-            const uint32_t w1 = (*dl)->w1;
             const uint32_t count = ((w0 >> 20) & 0xF) + 1;
+            const bool textured = ((w0 >> 16) & 0x1) != 0;
+            const uint32_t base = state->rsp->fromSegmentedMasked((*dl)->w1);
+            const uint8_t *RDRAM = state->RDRAM;
+            auto u8 = [&](uint32_t a) { return RDRAM[a ^ 3]; };
+            auto u16 = [&](uint32_t a) { return uint32_t((u8(a) << 8) | u8(a + 1)); };
 
-            const uint32_t rdramAddr = state->rsp->fromSegmentedMasked(w1);
-            uint8_t *RDRAM = state->RDRAM;
-
-            auto read_u8 = [&](uint32_t a) -> uint8_t {
-                return RDRAM[a ^ 3];
-            };
-            auto read_s16 = [&](uint32_t a) -> int16_t {
-                uint16_t hi = RDRAM[(a    ) ^ 3];
-                uint16_t lo = RDRAM[(a + 1) ^ 3];
-                return int16_t((hi << 8) | lo);
-            };
-
-            // F3D's G_CULL_BOTH constant from gbi_f3d.cpp setup.
-            constexpr uint32_t G_CULL_BOTH_F3D = 0x00003000;
-
+            RSP *rsp = state->rsp.get();
+            const uint32_t mode = rsp->geometryModeStack[rsp->geometryModeStackSize - 1];
+            // The game turns on G_CULL_FRONT for mirrored tracks, where the winding flips.
+            const uint32_t cull = (mode & CullFront) ? CullFront : CullBack;
+            uint32_t current = mode & CullBoth;
             for (uint32_t i = 0; i < count; i++) {
-                const uint32_t triAddr = rdramAddr + i * 16;
-                const uint8_t flags = read_u8(triAddr + 0);
-                const uint8_t vi0 = read_u8(triAddr + 1);
-                const uint8_t vi1 = read_u8(triAddr + 2);
-                const uint8_t vi2 = read_u8(triAddr + 3);
-
-                const int16_t s0 = read_s16(triAddr + 4);
-                const int16_t t0 = read_s16(triAddr + 6);
-                const int16_t s1 = read_s16(triAddr + 8);
-                const int16_t t1 = read_s16(triAddr + 10);
-                const int16_t s2 = read_s16(triAddr + 12);
-                const int16_t t2 = read_s16(triAddr + 14);
-
-                state->rsp->modifyVertex(vi0, G_MWO_POINT_ST,
-                    (uint32_t(uint16_t(s0)) << 16) | uint16_t(t0));
-                state->rsp->modifyVertex(vi1, G_MWO_POINT_ST,
-                    (uint32_t(uint16_t(s1)) << 16) | uint16_t(t1));
-                state->rsp->modifyVertex(vi2, G_MWO_POINT_ST,
-                    (uint32_t(uint16_t(s2)) << 16) | uint16_t(t2));
-
-                if (flags & 0x40) {
-                    state->rsp->clearGeometryMode(G_CULL_BOTH_F3D);
-                    state->rsp->drawIndexedTri(vi0, vi1, vi2);
-                    state->rsp->setGeometryMode(G_CULL_BOTH_F3D);
-                } else {
-                    state->rsp->drawIndexedTri(vi0, vi1, vi2);
+                const uint32_t tri = base + i * 16;
+                const uint8_t vi[3] = { u8(tri + 1), u8(tri + 2), u8(tri + 3) };
+                if ((vi[0] >= RSP_MAX_VERTICES) || (vi[1] >= RSP_MAX_VERTICES) || (vi[2] >= RSP_MAX_VERTICES)) continue;
+                if (textured) {
+                    for (int c = 0; c < 3; c++) rsp->modifyVertex(vi[c], G_MWO_POINT_ST, (u16(tri + 4 + c * 4) << 16) | u16(tri + 6 + c * 4));
                 }
+                const uint32_t want = (u8(tri) & 0x40) ? 0 : cull;
+                if (want != current) {
+                    rsp->modifyGeometryMode(~CullBoth, want);
+                    current = want;
+                }
+                rsp->drawIndexedTri(vi[0], vi[1], vi[2]);
             }
+            if (current != (mode & CullBoth)) rsp->modifyGeometryMode(~CullBoth, mode & CullBoth);
         }
 
-        // --- G_DMADL (0x07) ---
-        // Run N inline sub-DL commands from RDRAM. Sub-DL is count-bounded
-        // (no G_ENDDL terminator), so we iterate manually instead of going
-        // through runDl/endDl.
-        //   w0[23:16] = numCommands
-        //   w1        = segmented address of sub-DL
+        // G_DMADL (0x07): w0[23:16] = number of commands, w1 = their address.
         static void dmaDl(State *state, DisplayList **dl) {
-            const uint32_t w0 = (*dl)->w0;
-            const uint32_t w1 = (*dl)->w1;
-            const uint32_t numCommands = (w0 >> 16) & 0xFF;
-            if (numCommands == 0) return;
-
-            const uint32_t rdramAddr = state->rsp->fromSegmentedMasked(w1);
-            DisplayList *subDl = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddr));
-
+            const uint32_t count = ((*dl)->w0 >> 16) & 0xFF;
+            DisplayList *cmd = reinterpret_cast<DisplayList *>(state->fromRDRAM(state->rsp->fromSegmentedMasked((*dl)->w1)));
+            DisplayList *end = cmd + count;
             GBI *gbi = state->ext.interpreter->hleGBI;
-            for (uint32_t i = 0; i < numCommands; i++) {
-                DisplayList *cur = &subDl[i];
-                const uint8_t op = uint8_t(cur->w0 >> 24);
-                GBIFunction func = gbi->map[op];
-                if (func == nullptr) {
-                    continue;
-                }
-                DisplayList *cursor = cur;
-                func(state, &cursor);
+            for (; cmd < end; cmd++) {
+                if (GBIFunction func = gbi->map[cmd->w0 >> 24]) func(state, &cmd); // may consume extra words
             }
         }
 
-        // --- G_SETCIMG (0xFF) ---
-        // DKR sends SEGMENTED addresses (segment id in bits 27:24) where
-        // standard F3D usage is physical. F3D's RDP::setColorImage takes
-        // w1 raw, so RT64's framebuffer manager would key by the segmented
-        // bits and never match VI_ORIGIN's physical address. Resolve here.
-        static void setColorImageResolved(State *state, DisplayList **dl) {
+        static void setColorImage(State *state, DisplayList **dl) {
             const uint32_t w0 = (*dl)->w0;
-            const uint8_t fmt = (w0 >> 21) & 0x7;
-            const uint8_t siz = (w0 >> 19) & 0x3;
-            const uint16_t width = (w0 & 0xFFF) + 1;
-            const uint32_t resolved = state->rsp->fromSegmentedMasked((*dl)->w1);
-            state->rdp->setColorImage(fmt, siz, width, resolved);
+            state->rdp->setColorImage((w0 >> 21) & 0x7, (w0 >> 19) & 0x3, (w0 & 0xFFF) + 1, state->rsp->fromSegmentedMasked((*dl)->w1));
         }
 
-        // G_SETZIMG (0xFE): DKR also uses segmented addresses here.
-        static void setDepthImageResolved(State *state, DisplayList **dl) {
-            const uint32_t resolved = state->rsp->fromSegmentedMasked((*dl)->w1);
-            state->rdp->setDepthImage(resolved);
+        static void setDepthImage(State *state, DisplayList **dl) {
+            state->rdp->setDepthImage(state->rsp->fromSegmentedMasked((*dl)->w1));
         }
 
-        // G_SETTIMG (0xFD): DKR uses segmented addresses for texture image
-        // pointers too — these feed loadBlock/loadTile.
-        static void setTextureImageResolved(State *state, DisplayList **dl) {
+        static void setTextureImage(State *state, DisplayList **dl) {
             const uint32_t w0 = (*dl)->w0;
-            const uint32_t resolved = state->rsp->fromSegmentedMasked((*dl)->w1);
-            const uint8_t fmt = (w0 >> 21) & 0x7;
-            const uint8_t siz = (w0 >> 19) & 0x3;
-            const uint16_t width = (w0 & 0xFFF) + 1;
-            state->rdp->setTextureImage(fmt, siz, width, resolved);
-        }
-
-        // --- G_DMA_OFFSETS (0xBF) ---
-        //   w0 & 0x00FFFFFF = matrix DMA offset
-        //   w1 & 0x00FFFFFF = vertex DMA offset
-        static void dmaOffsets(State *state, DisplayList **dl) {
-            const uint32_t w0 = (*dl)->w0;
-            const uint32_t w1 = (*dl)->w1;
-            gDkr.matrixDmaOffset = w0 & 0x00FFFFFF;
-            gDkr.vertexDmaOffset = w1 & 0x00FFFFFF;
+            state->rdp->setTextureImage((w0 >> 21) & 0x7, (w0 >> 19) & 0x3, (w0 & 0xFFF) + 1, state->rsp->fromSegmentedMasked((*dl)->w1));
         }
 
         void setup(GBI *gbi) {
-            // Inherit F3D's full opcode set, then override DKR-specific ones.
-            GBI_F3D::setup(gbi);
-
-            gbi->map[F3DDKR_G_MTX]          = &mtx;
-            gbi->map[F3DDKR_G_VTX]          = &vtx;
-            gbi->map[F3DDKR_G_TRIN]         = &trin;
-            gbi->map[F3DDKR_G_DMADL]        = &dmaDl;
-            gbi->map[F3DDKR_G_MOVEWORD]     = &moveWord;
-            gbi->map[F3DDKR_G_DMA_OFFSETS]  = &dmaOffsets;
-            // DKR sends segmented addresses to G_SETCIMG / G_SETZIMG / G_SETTIMG.
-            // Override F3D's bindings (which take w1 raw) with segment-resolving
-            // wrappers so RT64's framebuffer manager and texture cache can match
-            // by physical address.
-            gbi->map[0xFF /* G_SETCIMG */]  = &setColorImageResolved;
-            gbi->map[0xFE /* G_SETZIMG */]  = &setDepthImageResolved;
-            gbi->map[0xFD /* G_SETTIMG */]  = &setTextureImageResolved;
-            // 0xBF in F3D is G_TRI1; in F3DDKR it is G_DMA_OFFSETS. The line
-            // above replaces F3D's tri1 binding, which is correct — DKR
-            // never sends a G_TRI1 there.
-
+            GBI_F3D::setup(gbi); // everything else is Fast3D's
+            gbi->map[F3DDKR_G_MTX] = &mtx;
+            gbi->map[F3DDKR_G_VTX] = &vtx;
+            gbi->map[F3DDKR_G_TRIN] = &trin;
+            gbi->map[F3DDKR_G_DMADL] = &dmaDl;
+            gbi->map[F3DDKR_G_MOVEWORD] = &moveWord;
+            gbi->map[0xFF] = &setColorImage;   // G_SETCIMG
+            gbi->map[0xFE] = &setDepthImage;   // G_SETZIMG
+            gbi->map[0xFD] = &setTextureImage; // G_SETTIMG
             gbi->resetFromTask = &reset;
         }
-
-    }  // namespace GBI_F3DDKR
-}  // namespace RT64
+    }
+}

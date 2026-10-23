@@ -53,6 +53,8 @@ namespace RT64 {
         vertices.fill({});
         indices.fill(0);
         used.reset();
+        hasScreenXY.reset();
+        hasScreenZ.reset();
         lights.fill({});
         segments.fill(0);
         viewportStack[0] = {};
@@ -408,10 +410,11 @@ namespace RT64 {
             return;
         }
 
-        const uint32_t rdramAddress = fromSegmentedMasked(address);
+        // DKR's vertex arrays are only 2-byte aligned: the microcode DMAs from the 8-byte aligned
+        // address and skips address & 6 bytes, so keep those bits that the mask drops.
+        const uint32_t rdramAddress = fromSegmentedMasked(address) + (address & 6);
         uint8_t *RDRAM = state->RDRAM;
-        // DKR vert stride = 10 bytes; values stored big-endian, accessed
-        // via N64Recomp's XOR-3 byte-swap convention.
+        // 10-byte vertices, big-endian, read through the byte-swapped RDRAM (address ^ 3).
         for (uint32_t i = 0; i < vtxCount; i++) {
             const uint32_t base = rdramAddress + i * 10;
             auto read_s16 = [&](uint32_t off) -> int16_t {
@@ -437,29 +440,23 @@ namespace RT64 {
         }
         setVertexCommon<true, 10>(rdramAddress, dstIndex, dstIndex + vtxCount);
 
-        // Billboard fixup: DKR's sprite mode adds the anchor's clip-space
-        // coords (slot 0) to every non-anchor vert in this load, then
-        // re-projects. The anchor is always RSP vertex slot 0.
+        // Billboards: each vertex after the anchor (vertex 0) gets the anchor's clip-space position
+        // added before the perspective divide. The GPU transforms vertices itself, so the result
+        // goes to it as a screen-position override (as G_MWO_POINT_XYSCREEN/ZSCREEN do).
         if (billboardEnabled) {
-            const int workloadCursor = state->ext.workloadQueue->writeCursor;
-            Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
+            Workload &workload = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
             auto &posTransformed = workload.drawData.posTransformed;
-            auto &posScreen = workload.drawData.posScreen;
             const interop::RSPViewport &viewport = viewportStack[viewportStackSize - 1];
-
-            // Just-loaded verts are appended at the end. They each got a fresh
-            // globalIndex assigned in setVertexCommon: indices[dstIndex+i].
-            const uint32_t anchorGlobal = indices[0];
-            if (anchorGlobal < posTransformed.size()) {
-                const hlslpp::float4 anchorClip = posTransformed[anchorGlobal];
-                for (uint32_t i = 0; i < vtxCount; i++) {
-                    if (dstIndex + i == 0) continue;  // anchor itself — leave alone
-                    const uint32_t gi = indices[dstIndex + i];
-                    if (gi >= posTransformed.size()) continue;
-                    hlslpp::float4 &tf = posTransformed[gi];
-                    tf = tf + anchorClip;
-                    posScreen[gi] = (tf.xyz / hlslpp::float3(tf.w, -tf.w, tf.w)) * viewport.scale + viewport.translate;
-                }
+            const hlslpp::float4 anchorClip = posTransformed[indices[0]];
+            for (uint32_t i = (dstIndex == 0) ? 1 : 0; i < vtxCount; i++) {
+                const uint32_t globalIndex = indices[dstIndex + i];
+                hlslpp::float4 &clip = posTransformed[globalIndex];
+                clip = clip + anchorClip;
+                const hlslpp::float3 screen = (clip.xyz / hlslpp::float3(clip.w, -clip.w, clip.w)) * viewport.scale + viewport.translate;
+                const int16_t sx = int16_t(std::clamp(float(screen[0]) * 4.0f, -32768.0f, 32767.0f));
+                const int16_t sy = int16_t(std::clamp(float(screen[1]) * 4.0f, -32768.0f, 32767.0f));
+                modifyVertex(uint16_t(dstIndex + i), G_MWO_POINT_XYSCREEN, (uint32_t(uint16_t(sx)) << 16) | uint16_t(sy));
+                modifyVertex(uint16_t(dstIndex + i), G_MWO_POINT_ZSCREEN, uint32_t(std::clamp(float(screen[2]), 0.0f, 1.0f) * 65535.0f));
             }
         }
     }
@@ -755,6 +752,8 @@ namespace RT64 {
             lookAtIndices.emplace_back(curLookAtIndex);
             indices[i] = uint32_t(globalIndex) + (i - dstIndex);
             used[i] = false;
+            hasScreenXY[i] = false;
+            hasScreenZ[i] = false;
 
             if constexpr (addEmptyVelocity) {
                 velFloats.emplace_back(0.0f);
@@ -844,6 +843,17 @@ namespace RT64 {
             lookAtIndices.emplace_back(lookAtIndices[globalIndex]);
             posTransformed.emplace_back(posTransformed[globalIndex]);
             posScreen.emplace_back(posScreen[globalIndex]);
+
+            // The copy keeps any screen position set with G_MWO_POINT_XYSCREEN/ZSCREEN.
+            if (hasScreenXY[dstIndex]) {
+                modifyPosUints.emplace_back(newIndex << 1);
+                modifyPosUints.emplace_back(screenXY[dstIndex]);
+            }
+            if (hasScreenZ[dstIndex]) {
+                modifyPosUints.emplace_back((newIndex << 1) | 0x1);
+                modifyPosUints.emplace_back(screenZ[dstIndex]);
+            }
+
             indices[dstIndex] = newIndex;
             used[dstIndex] = false;
             globalIndex = indices[dstIndex];
@@ -873,6 +883,8 @@ namespace RT64 {
             // First bit being 0 indicates it should modify only XY.
             modifyPosUints.emplace_back(globalIndex << 1);
             modifyPosUints.emplace_back(value);
+            screenXY[dstIndex] = value;
+            hasScreenXY[dstIndex] = true;
 
             // We decode on the CPU anyway for draw area tracking and the debugger.
             const uint16_t extX = (value >> 16) & 0xFFFF;
@@ -885,6 +897,8 @@ namespace RT64 {
             // First bit being 1 indicates it should modify only Z.
             modifyPosUints.emplace_back((globalIndex << 1) | 0x1);
             modifyPosUints.emplace_back(value);
+            screenZ[dstIndex] = value;
+            hasScreenZ[dstIndex] = true;
 
             // We decode on the CPU anyway for depth tracking, branchZ and the debugger.
             posScreen[globalIndex][2] = value / 65536.0f;

@@ -471,6 +471,12 @@ namespace RT64 {
         }
     }
 
+    // A load reaching past RDRAM can only come from garbage commands (a display list running into
+    // data); the RDP would read wrapped memory, here it would fault. Skip it instead.
+    static bool loadOutsideRDRAM(const State *state, uint32_t textureStart, uint64_t byteCount) {
+        return !state->extended.extendRDRAM && ((uint64_t(textureStart) + byteCount) > (uint64_t(RDRAMSize) + 1));
+    }
+
     void RDP::loadTileOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
         const uint32_t bytesOffset = (loadTile.uls >> 2) << loadTexture.siz >> 1;
         const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;
@@ -497,7 +503,7 @@ namespace RT64 {
             const uint32_t lineWidth = loadTile.line << ((4 + lineShift) - loadTile.siz);
             checkFramebufferOverlap(tmemStart >> 3, tmemBytes >> 3, tmemMask, textureStart, textureEnd, lineWidth, rowCount, RGBA32, true);
         }
-        else {
+        else if (!loadOutsideRDRAM(state, textureStart, uint64_t(rowCount - 1) * bytesPerRow + (uint64_t(wordsPerRow) << 3))) {
             // Load into TMEM.
             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
             const uint8_t *RDRAM = state->RDRAM;
@@ -533,7 +539,7 @@ namespace RT64 {
             // Check for any GPU copies that can be made.
             checkFramebufferOverlap(tmemStart >> 3, tmemBytes >> 3, tmemMask, textureStart, textureEnd, 0, 0, RGBA32, true);
         }
-        else {
+        else if (!loadOutsideRDRAM(state, textureStart, uint64_t(wordCount) << 3)) {
             // Load into TMEM.
             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
             const uint8_t *RDRAM = state->RDRAM;
@@ -573,7 +579,7 @@ namespace RT64 {
             const uint32_t tileWidth = loadTile.line << ((4 + lineShift) - loadTile.siz);
             checkFramebufferOverlap(tmemStart >> 3, tmemBytes >> 3, tmemMask, textureStart, textureEnd, 0, 0, RGBA32, false);
         }
-        else {
+        else if (!loadOutsideRDRAM(state, textureStart, uint64_t(rowCount - 1) * bytesPerRow + (uint64_t(wordsPerRow) << 3))) {
             // Load into TMEM.
             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
             const uint8_t *RDRAM = state->RDRAM;

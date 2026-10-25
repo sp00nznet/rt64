@@ -325,7 +325,11 @@ namespace RT64 {
         // Create the swap chain with the texture count specified from the configuration.
         RenderSwapChainDesc swapChainDesc;
         swapChainDesc.renderWindow = appWindow->windowHandle;
+#   if defined(__ANDROID__)
+        swapChainDesc.format = RenderFormat::R8G8B8A8_UNORM; // what Android's surfaces offer
+#   else
         swapChainDesc.format = RenderFormat::B8G8R8A8_UNORM;
+#   endif
         swapChainDesc.textureCount = (userConfig.displayBuffering == UserConfiguration::DisplayBuffering::Triple) ? 3 : 2;
 
         // Enable present wait if supported by the device. We specify a max latency of 1 as we use it to wait right before the next

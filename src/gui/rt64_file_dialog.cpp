@@ -6,6 +6,18 @@
 
 #include <cassert>
 
+#if defined(__ANDROID__)
+// No native file dialogs on Android (nativefiledialog has no backend there): every dialog comes
+// back cancelled, with an empty path.
+namespace RT64 {
+    std::atomic<bool> FileDialog::isOpen = false;
+    void FileDialog::initialize() {}
+    void FileDialog::finish() {}
+    void FileDialog::getDirectoryPath(const Callback &callback) { callback({}); }
+    void FileDialog::getOpenFilename(const std::vector<FileFilter> &, const Callback &callback) { callback({}); }
+    void FileDialog::getSaveFilename(const std::vector<FileFilter> &, const Callback &callback) { callback({}); }
+};
+#else
 #include <nfd.h>
 
 #if defined(__APPLE__)
@@ -99,3 +111,4 @@ namespace RT64 {
 
     }
 };
+#endif

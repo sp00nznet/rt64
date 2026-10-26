@@ -58,7 +58,8 @@ elseif (APPLE)
         set (SPIRVCROSS "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/lib/arm64:$ENV{DYLD_LIBRARY_PATH}" "${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/bin/arm64/spirv-cross")
     endif()
 else()
-    if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
+    # The build machine's CPU: dxc runs there, also when cross-compiling (Android).
+    if (CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "x86_64")
         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
     else()
         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/arm64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/arm64/dxc-linux")
@@ -68,10 +69,20 @@ endif()
 set(ZSTD_LEGACY_SUPPORT OFF)
 set(ZSTD_BUILD_STATIC ON)
 set(ZSTD_BUILD_SHARED OFF)
+set(ZSTD_BUILD_DICTBUILDER OFF) # unused, and its qsort_r isn't in Android's libc
 
-add_subdirectory(src/tools/file_to_c)
+# file_to_c runs during the build, so a cross-compile (Android) needs one built for the build
+# machine: pass its path as RT64_HOST_FILE_TO_C.
+if (CMAKE_CROSSCOMPILING AND RT64_HOST_FILE_TO_C)
+    add_executable(file_to_c IMPORTED)
+    set_target_properties(file_to_c PROPERTIES IMPORTED_LOCATION "${RT64_HOST_FILE_TO_C}")
+else()
+    add_subdirectory(src/tools/file_to_c)
+endif()
 add_subdirectory(src/contrib/re-spirv)
-add_subdirectory(src/contrib/nativefiledialog-extended)
+if (NOT ANDROID) # no backend there; rt64_file_dialog.cpp stubs the dialogs out
+    add_subdirectory(src/contrib/nativefiledialog-extended)
+endif()
 add_subdirectory(src/contrib/zstd/build/cmake)
 
 if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
@@ -289,7 +300,7 @@ if (WIN32)
     set(SDL2_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
     set(SDL2_LIBRARIES "SDL2" "SDL2main")
     link_directories("${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
-else()
+elseif (NOT TARGET SDL2::SDL2) # an including project may have added SDL itself (Android)
     find_package(SDL2 REQUIRED)
 endif()
 
@@ -441,7 +452,9 @@ set_target_properties(rt64 PROPERTIES PREFIX "")
 
 # Add common libraries.
 target_link_libraries(rt64 re-spirv)
-target_link_libraries(rt64 nfd)
+if (NOT ANDROID)
+    target_link_libraries(rt64 nfd)
+endif()
 target_link_libraries(rt64 libzstd_static)
 target_link_libraries(rt64 plume)
 
@@ -483,6 +496,8 @@ target_link_directories(rt64 PRIVATE ${PROJECT_SOURCE_DIR}/src/contrib/dxc)
 
 if (NOT ANDROID)
     target_link_libraries(rt64 ${SDL2_LIBRARIES})
+else()
+    target_link_libraries(rt64 android log) # ANativeWindow
 endif()
 
 if (CMAKE_SYSTEM_NAME MATCHES "Linux")
